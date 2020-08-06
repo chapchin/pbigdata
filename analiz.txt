@@ -1,0 +1,160 @@
+1. Получить статистику по дням. 
+Просто посчитать число всех событий по дням, число показов, число кликов, число уникальных объявлений и уникальных кампаний:
+select date , count(event),countIf(event, event='view'),countIf(event, event='click'),count(distinct ad_id),count(distinct campaign_union_id)
+from ads_data
+group by date;
+2019-04-01,22073,21782,291,150,149
+2019-04-02,47117,46572,545,344,336
+2019-04-03,59483,59023,460,360,352
+2019-04-04,275735,275092,643,407,396
+2019-04-05,519707,427386,92321,465,442
+2019-04-06,75885,60967,14918,220,212
+
+2.Разобраться, почему случился такой скачок 2019-04-05? Каких событий стало больше? У всех объявлений или только у некоторых?
+select date, event, ad_id, count(ad_id) as count from ads_data
+group by ad_id, date, event
+order by count desc;
+2019-04-05,view,112583,302811
+2019-04-04,view,107729,154872
+2019-04-05,click,112583,91017
+2019-04-06,view,112583,48991
+2019-04-04,view,107837,43658
+2019-04-05,view,107729,29724
+2019-04-05,view,28142,20872
+2019-04-04,view,45008,16523
+2019-04-03,view,39191,15199
+
+из полученных данных видно что:
+4 и 5-го рост показов обьявлений 112583 и 154872, рост кликов у обьявления 112583
+можно предположить что в случае качественного креатива с увеличением числа показов получаем большее число кликов
+
+3.Найти топ 10 объявлений по CTR за все время. CTR — это отношение всех кликов объявлений к просмотрам. 
+Например, если у объявления было 100 показов и 2 клика, CTR = 0.02. Различается ли средний и медианный CTR объявлений в наших данных?
+
+select countIf(event = 'click') as clicks, countIf(event = 'view') as views, ad_id, clicks/views as ctr  from ads_data
+group by ad_id
+order by ctr desc;
+
+19223,∞
+117364,∞
+120536,∞
+120796,∞
+41500,∞
+120431,∞
+45418,∞
+26204,∞
+115825,∞
+117164,0.3157894736842105
+
+Из данных видно что самый большой ctr получился у обьявлений, где просмотры были равны 0
+
+Если отбросить обьявления, где просмотры были равны 0, то тогда топ 10 ctr аолучится таким:
+117164,0.3157894736842105,19,6
+112583,0.3006435438115758,351802,105767
+42507,0.2727272727272727,11,3
+98569,0.1875,16,3
+46639,0.17391304347826086,253,44
+23599,0.16666666666666666,24,4
+19912,0.16,25,4
+110414,0.15625,32,5
+45969,0.15384615384615385,13,2
+20662,0.15384615384615385,26,4
+
+- Различается ли средний и медианный CTR объявлений в наших данных?
+select avg(clicks/views) as avg, quantile(0.5)(clicks/views) as mediana
+from
+(select ad_id, countIf(event = 'click') as clicks, countIf(event = 'view') as views
+from ads_data
+group by ad_id);
+
+∞,0.003125
+
+средний и медианный CTR объявлений Отличаются
+
+4.Похоже, в наших логах есть баг, объявления приходят с кликами, но без показов! 
+- Сколько таких объявлений, есть ли какие-то закономерности?
+select count() as bag from
+(select ad_id,
+countIf(event = 'click') as clicks,
+countIf(event = 'view') as views
+   from ads_data
+   group by  ad_id)
+where views = 0 and clicks != 0;
+
+таких обьявлений bag = 9
+ 
+- Эта проблема наблюдается на всех платформах?
+SELECT ad_id,
+platform,
+has_video,
+countIf(event = 'click') AS clicks,
+countIf(event = 'view') AS views
+   FROM ads_data
+   GROUP BY ad_id, platform, has_video
+   HAVING views = 0 AND clicks != 0
+    order by ad_id;	
+Эта проблема не для всех платформ, и это обьявления без видео.
+
+5.Есть ли различия в CTR у объявлений с видео и без? 
+SELECT ad_id,
+countIf(event = 'click' and has_video=1) AS click1,
+countIf(event = 'click' and has_video=0) AS click0,
+countIf(event = 'view' and has_video=1) AS view1,
+countIf(event = 'view' and has_video=0) AS view0,
+click1/view1-click0/view0 AS razn
+FROM ads_data
+GROUP BY ad_id HAVING isNaN(razn)=0;
+
+из полученных данных видим, что обьявления или с видео или без видео.
+
+- А чему равняется 95 процентиль CTR по всем объявлениям за 2019-04-04?
+select quantile(0.95)(clicks/views) as qvant
+from
+(select ad_id, countIf(event = 'click') as clicks, countIf(event = 'view') as views
+from ads_data
+where date='2019-04-04'
+group by ad_id);
+
+95 процентиль CTR по всем объявлениям за 2019-04-04 = 0.08209570957095705
+
+6.Для финансового отчета нужно рассчитать наш заработок по дням. В какой день мы заработали больше всего? В какой меньше? 
+Мы списываем с клиентов деньги, если произошел клик по CPC объявлению, и мы списываем деньги за каждый показ CPM объявления, 
+если у CPM объявления цена - 200 рублей, то за один показ мы зарабатываем 200 / 1000.
+select date, sum(multiIf((ad_cost_type = 'CPC') AND (event = 'click'), ad_cost, (ad_cost_type = 'CPM') AND (event = 'view'), ad_cost / 1000, 0)) as sum
+from ads_data
+group by date
+order by sum;
+
+- В какой день мы заработали больше всего? 
+2019-04-05,96123.12355434723
+
+- В какой меньше? 
+2019-04-01,6655.70716780087
+
+
+7.Какая платформа самая популярная для размещения рекламных объявлений? 
+Сколько процентов показов приходится на каждую из платформ (колонка platform)?
+SELECT count() as countp, (SELECT count() as count FROM ads_data WHERE event='view') as count, platform, countp*100/count as percent
+FROM ads_data
+WHERE event='view'
+GROUP BY platform
+ORDER BY platform;
+
+- Какая платформа самая популярная для размещения рекламных объявлений? android
+- Сколько процентов показов приходится на каждую из платформ (колонка platform)?
+android,50.034911576049986
+ios,29.98545163904798
+web,19.979636784902034
+
+это говорит нам о том что android наиболее популярная площадка у пользователей.
+
+8.А есть ли такие объявления, по которым сначала произошел клик, а только потом показ?
+select count()
+from
+(select ad_id, minIf(time, event = 'click') as mintc, min(time) as mint
+from ads_data
+group by ad_id)
+where mintc=mint;
+
+Таких обьявлений 23
+Можно предположить, что такое происходит из-за неправильно настроенных часовых поясов.
